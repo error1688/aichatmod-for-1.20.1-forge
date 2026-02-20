@@ -8,7 +8,6 @@ import net.minecraft.network.chat.Component;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.awt.Desktop;
 import java.io.File;
 import java.io.IOException;
 import java.util.Arrays;
@@ -233,27 +232,22 @@ public class ConfigScreen extends Screen {
     private void openConfigFolder() {
         File configDir = new File("config");
         if (!configDir.exists()) {
-            configDir.mkdirs();
+            if (!configDir.mkdirs()) {
+                LOGGER.error("无法创建 config 文件夹");
+                return;
+            }
         }
 
+        String os = System.getProperty("os.name").toLowerCase(Locale.ROOT);
         try {
-            String os = System.getProperty("os.name").toLowerCase(Locale.ROOT);
             if (os.contains("win")) {
-                // Windows
-                Runtime.getRuntime().exec("explorer " + configDir.getAbsolutePath());
+                Runtime.getRuntime().exec("explorer \"" + configDir.getAbsolutePath() + "\"");
             } else if (os.contains("mac")) {
-                // macOS
-                Runtime.getRuntime().exec("open " + configDir.getAbsolutePath());
+                Runtime.getRuntime().exec("open \"" + configDir.getAbsolutePath() + "\"");
             } else if (os.contains("nix") || os.contains("nux") || os.contains("aix")) {
-                // Linux/Unix
-                Runtime.getRuntime().exec("xdg-open " + configDir.getAbsolutePath());
+                Runtime.getRuntime().exec("xdg-open \"" + configDir.getAbsolutePath() + "\"");
             } else {
-                // 回退：尝试使用 Desktop（可能失败）
-                if (Desktop.isDesktopSupported()) {
-                    Desktop.getDesktop().open(configDir);
-                } else {
-                    LOGGER.error("无法打开文件夹：不支持的平台");
-                }
+                LOGGER.error("不支持的操作系统: {}", os);
             }
         } catch (IOException e) {
             LOGGER.error("打开配置文件夹失败", e);

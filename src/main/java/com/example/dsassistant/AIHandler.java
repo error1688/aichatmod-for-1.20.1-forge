@@ -12,111 +12,128 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 public class AIHandler {
     private static final Logger LOGGER = LogManager.getLogger("AIHandler");
     private static final int MAX_HISTORY = 10;
-    private static final List<String> messageHistory = new ArrayList<>();
-    private static Config.Personality lastPersonality = null;
+    private static final int CONNECT_TIMEOUT = 5000;  // 5秒
+    private static final int READ_TIMEOUT = 8000;     // 8秒
+    private static final ExecutorService POOL = Executors.newCachedThreadPool(); // 独立线程池
+
+    // 使用 CopyOnWriteArrayList 避免同步开销
+    private static final List<String> messageHistory = new CopyOnWriteArrayList<>();
+    private static volatile Config.Personality lastPersonality = null;
 
     public static void requestAIResponse(String playerName, String message, Consumer<String> callback) {
+        // 人格变化检查（无需同步，volatile保证可见性）
         Config.Personality currentPersonality = Config.CLIENT.personality.get();
         if (lastPersonality != currentPersonality) {
-            if (Config.CLIENT.debug.get()) {
-                LOGGER.info("人格从 {} 切换为 {}，清空历史记录", lastPersonality, currentPersonality);
-            }
-            synchronized (messageHistory) {
-                messageHistory.clear();
-            }
+            messageHistory.clear();
             lastPersonality = currentPersonality;
+            if (Config.CLIENT.debug.get()) {
+                LOGGER.info("人格切换为：{}", currentPersonality);
+            }
         }
 
-        CompletableFuture.supplyAsync(() -> {
-            try {
-                String apiKey = ApiKeyStorage.loadApiKey();
-                if (apiKey.isEmpty()) {
-                    return "请先在配置中设置 API 密钥";
-                }
-                String urlStr = UrlStorage.loadUrl();
-                URL url = new URL(urlStr);
-                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                conn.setRequestMethod("POST");
-                conn.setRequestProperty("Content-Type", "application/json");
-                conn.setRequestProperty("Authorization", "Bearer " + apiKey);
-                conn.setDoOutput(true);
+        POOL.submit(() -> {  // 使用独立线程池
+            int retries = 1; // 只重试一次，避免占用资源
+            String result = null;
+            while (retries-- >= 0) {
+                try {
+                    String apiKey = ApiKeyStorage.loadApiKey();
+                    if (apiKey.isEmpty()) {
+                        result = "§c[DS助手] 请设置 API 密钥";
+                        break;
+                    }
+                    String urlStr = UrlStorage.loadUrl();
+                    URL url = new URL(urlStr);
+                    HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                    conn.setRequestMethod("POST");
+                    conn.setRequestProperty("Content-Type", "application/json");
+                    conn.setRequestProperty("Authorization", "Bearer " + apiKey);
+                    conn.setConnectTimeout(CONNECT_TIMEOUT);
+                    conn.setReadTimeout(READ_TIMEOUT);
+                    conn.setDoOutput(true);
 
-                String jsonInput = buildJsonRequest(playerName, message);
-                if (Config.CLIENT.debug.get()) {
-                    LOGGER.info("Request JSON: {}", jsonInput);
-                }
+                    String jsonInput = buildJsonRequest(playerName, message);
+                    try (OutputStream os = conn.getOutputStream()) {
+                        os.write(jsonInput.getBytes(StandardCharsets.UTF_8));
+                    }
 
-                try (OutputStream os = conn.getOutputStream()) {
-                    byte[] input = jsonInput.getBytes(StandardCharsets.UTF_8);
-                    os.write(input, 0, input.length);
-                }
-
-                int responseCode = conn.getResponseCode();
-                if (responseCode != 200) {
-                    String errorMessage = "无详细错误信息";
-                    if (conn.getErrorStream() != null) {
-                        try (BufferedReader errorReader = new BufferedReader(new InputStreamReader(conn.getErrorStream(), StandardCharsets.UTF_8))) {
-                            StringBuilder errorResponse = new StringBuilder();
-                            String line;
-                            while ((line = errorReader.readLine()) != null) {
-                                errorResponse.append(line);
+                    int code = conn.getResponseCode();
+                    if (code == 200) {
+                        String responseBody = readStream(conn.getInputStream());
+                        result = parseResponse(responseBody);
+                        if (result != null && !result.isEmpty()) {
+                            messageHistory.add("assistant:" + result);
+                            if (messageHistory.size() > MAX_HISTORY * 2) {
+                                messageHistory.remove(0);
                             }
-                            errorMessage = errorResponse.toString();
+                            result = cleanResponse(result);
+                        } else {
+                            result = "§c[DS助手] 返回为空";
+                        }
+                        break;
+                    } else {
+                        LOGGER.warn("API 返回错误码: {}", code);
+                        if (retries <= 0) result = "§c[DS助手] 请求失败，错误码 " + code;
+                    }
+                } catch (SocketTimeoutException e) {
+                    LOGGER.warn("请求超时，剩余重试: {}", retries);
+                    if (retries <= 0) result = "§c[DS助手] 请求超时";
+                } catch (Exception e) {
+                    LOGGER.error("API请求异常", e);
+                    result = "§c[DS助手] 发生错误";
+                    break;
+                }
+            }
+
+            // 回调到主线程
+            final String finalResult = result;
+            Minecraft.getInstance().execute(() -> {
+                try {
+                    AIChatMod.sendingAIResponse = true;
+                    var player = Minecraft.getInstance().player;
+                    if (player != null && finalResult != null) {
+                        if (finalResult.startsWith("§c[DS助手]")) {
+                            player.displayClientMessage(Component.literal(finalResult), false);
+                        } else {
+                            player.connection.sendChat(finalResult);
                         }
                     }
-                    LOGGER.error("API 请求失败，错误码: {}, 错误信息: {}", responseCode, errorMessage);
-                    return "API 请求失败，错误码：" + responseCode + "，详情：" + errorMessage;
+                } finally {
+                    AIChatMod.sendingAIResponse = false;
                 }
-
-                try (BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8))) {
-                    StringBuilder response = new StringBuilder();
-                    String line;
-                    while ((line = br.readLine()) != null) {
-                        response.append(line);
-                    }
-                    String aiResponse = parseResponse(response.toString());
-                    addToHistory("assistant", aiResponse);
-                    return cleanResponse(aiResponse);
-                }
-
-            } catch (Exception e) {
-                LOGGER.error("API 请求出错", e);
-                return "发生错误: " + e.getMessage();
-            }
-        }).thenAcceptAsync(response -> {
-            try {
-                AIChatMod.sendingAIResponse = true;
-                var player = Minecraft.getInstance().player;
-                if (player != null && response != null && !response.startsWith("API 请求失败") && !response.startsWith("发生错误")) {
-                    player.connection.sendChat(response);
-                } else if (response != null) {
-                    player.displayClientMessage(Component.literal("§c[DS助手] " + response), false);
-                }
-            } finally {
-                AIChatMod.sendingAIResponse = false;
-            }
-        }, Minecraft.getInstance()::submit);
+            });
+        });
     }
 
-    private static synchronized void addToHistory(String role, String content) {
-        messageHistory.add(role + ":" + content);
+    private static String readStream(java.io.InputStream stream) throws java.io.IOException {
+        if (stream == null) return "";
+        try (BufferedReader br = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+            StringBuilder sb = new StringBuilder();
+            String line;
+            while ((line = br.readLine()) != null) {
+                sb.append(line);
+            }
+            return sb.toString();
+        }
+    }
+
+    private static String buildJsonRequest(String playerName, String message) {
+        messageHistory.add("user:玩家 " + playerName + " 说：" + message);
         if (messageHistory.size() > MAX_HISTORY * 2) {
             messageHistory.remove(0);
         }
-    }
-
-    private static synchronized String buildJsonRequest(String playerName, String message) {
-        addToHistory("user", "玩家 " + playerName + " 说：" + message);
 
         JsonObject root = new JsonObject();
         root.addProperty("model", Config.CLIENT.model.get());
@@ -146,41 +163,28 @@ public class AIHandler {
     }
 
     private static String getSystemPrompt() {
-        Config.Personality currentPersonality = Config.CLIENT.personality.get();
-        if (Config.CLIENT.debug.get()) {
-            AIChatMod.LOGGER.info("当前人格: {}", currentPersonality);
-        }
-        String prompt;
-        switch (currentPersonality) {
+        Config.Personality p = Config.CLIENT.personality.get();
+        switch (p) {
             case PROFESSIONAL_MC:
-                prompt = "你是一个专业的 Minecraft 玩家，精通游戏机制、红石、建筑等。回答尽量简洁、专业，分点列出，每点不超过一行。";
-                break;
+                return "你是一个专业的Minecraft玩家，精通游戏机制、红石、建筑等。回答简洁、专业，分点列出，每点不超过一行。";
             case SUNBA_HUANGPAI:
-                prompt = "你是一个孙吧黄牌用户，喜欢玩梗，说话幽默搞笑，有时带点讽刺。使用网络用语。";
-                break;
+                return "你是一个孙吧黄牌用户，喜欢玩梗，说话幽默搞笑，有时带点讽刺。使用网络用语。";
             case CATGIRL:
-                prompt = "你是一只可爱的猫娘，喜欢撒娇，用可爱的语气说话，经常加上喵~等后缀。";
-                break;
+                return "你是一只可爱的猫娘，喜欢撒娇，用可爱的语气说话，经常加上喵~等后缀。";
             case CUSTOM:
-                prompt = Config.CLIENT.customPrompt.get();
-                break;
+                return Config.CLIENT.customPrompt.get();
             default:
-                prompt = "你是一个友好的助手。";
+                return "你是一个友好的助手。";
         }
-        if (Config.CLIENT.debug.get()) {
-            AIChatMod.LOGGER.info("系统提示词: {}", prompt);
-        }
-        return prompt;
     }
 
     private static String parseResponse(String json) {
         try {
             JsonObject root = JsonParser.parseString(json).getAsJsonObject();
-
             if (root.has("usage")) {
                 JsonObject usage = root.getAsJsonObject("usage");
-                int totalTokens = usage.get("total_tokens").getAsInt();
-                UsageTracker.addTokens(totalTokens);
+                int tokens = usage.get("total_tokens").getAsInt();
+                UsageTracker.addTokens(tokens);
             }
             UsageTracker.incrementRequests();
 
@@ -188,25 +192,24 @@ public class AIHandler {
             if (choices != null && choices.size() > 0) {
                 JsonObject choice = choices.get(0).getAsJsonObject();
                 JsonObject message = choice.getAsJsonObject("message");
-                if (message != null) {
+                if (message != null && message.has("content")) {
                     return message.get("content").getAsString();
                 }
             }
-            return "无法解析回复";
+            return null;
         } catch (Exception e) {
             LOGGER.error("解析响应失败", e);
-            return "解析错误";
+            return null;
         }
     }
 
     private static String cleanResponse(String text) {
         if (text == null) return "";
+        // 移除控制字符
         String cleaned = text.replaceAll("[\\p{Cc}\\p{Cf}\\p{Co}\\p{Cn}]", "");
-        // 智能截断：在句子边界截断
+        // 截断过长消息（256字符以内）
         if (cleaned.length() > 256) {
-            int lastPeriod = cleaned.lastIndexOf('.', 256);
-            int lastNewline = cleaned.lastIndexOf('\n', 256);
-            int cut = Math.max(lastPeriod, lastNewline);
+            int cut = Math.max(cleaned.lastIndexOf('.', 256), cleaned.lastIndexOf('\n', 256));
             if (cut > 200) {
                 cleaned = cleaned.substring(0, cut + 1) + "……";
             } else {
