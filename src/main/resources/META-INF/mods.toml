@@ -1,0 +1,37 @@
+modLoader="javafml"
+loaderVersion="[47,)"
+license="All rights reserved"
+
+[[mods]]
+modId="dsassistant"
+version="1.0.5"
+displayName="DS 助手"
+logoFile="e343c02ca99b735186a2b8e4602c0bdb.jpeg"
+credits="作者：error168"
+authors="error168"
+description='''
+DS 助手是一个客户端模组，接入语言大模型 API（如 DeepSeek），为 Minecraft 聊天提供 AI 回复功能。
+
+功能特色：
+- 两种模式：自动回复（带黑/白名单）和可点击回复
+- 多种人格预设：专业 MC 玩家、孙吧黄牌、猫娘、自定义
+- 快捷键快速开关模组和打开配置界面（默认 H 和 J）
+- API 用量统计（请求次数和 token 消耗）
+- 完全可自定义的提示词、模型参数等
+
+使用前请确保在配置中填入有效的 API 密钥。
+'''
+
+[[dependencies.dsassistant]]
+modId="forge"
+mandatory=true
+versionRange="[47,)"
+ordering="NONE"
+side="CLIENT"
+
+[[dependencies.dsassistant]]
+modId="minecraft"
+mandatory=true
+versionRange="[1.20.1,1.20.2)"
+ordering="NONE"
+side="CLIENT"
