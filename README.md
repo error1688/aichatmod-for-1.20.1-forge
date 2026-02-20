@@ -44,3 +44,9 @@ Community Documentation: https://docs.minecraftforge.net/en/1.20.1/gettingstarte
 LexManos' Install Video: https://youtu.be/8VEdtQLuLO0
 Forge Forums: https://forums.minecraftforge.net/
 Forge Discord: https://discord.minecraftforge.net/
+
+模组展示: 
+=========================
+<img width="1708" height="960" alt="2026-02-20_16 41 40" src="https://github.com/user-attachments/assets/b451e4bb-1af8-4df6-be51-8c6b513342d0" />
+<img width="1708" height="960" alt="2026-02-20_16 41 45" src="https://github.com/user-attachments/assets/183832b0-fa7b-41b7-8f69-19b2cf613707" />
+
